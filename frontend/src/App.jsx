@@ -20,7 +20,13 @@ import {
   Send,
   Download,
   Sun,
-  Moon
+  Moon,
+  Lock,
+  Unlock,
+  Clock,
+  MessageSquare,
+  Award,
+  Activity
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
@@ -40,11 +46,13 @@ export default function App() {
   const [sessionToken, setSessionToken] = useState('');
   const [projectorLight, setProjectorLight] = useState(false);
 
+  // Poll State & Controls
   const [activePoll, setActivePoll] = useState({
     id: 'poll-01',
     question: "Rate today's live presentation & WebSocket responsiveness:",
     type: 'rating',
-    status: 'active'
+    status: 'active',
+    isLocked: false
   });
   const [pollOptions, setPollOptions] = useState([]);
   const [voteCounts, setVoteCounts] = useState({ 'opt-1': 22, 'opt-2': 18, 'opt-3': 8, 'opt-4': 4 });
@@ -52,18 +60,27 @@ export default function App() {
   const [wordList, setWordList] = useState(['Interactive', 'Fast', 'Scalable', 'Interactive', 'Real-time', 'Fast', 'Innovative']);
   const [votedPolls, setVotedPolls] = useState(new Set());
 
+  // Timer & Locking State
+  const [timeLeft, setTimeLeft] = useState(null);
+  const [isPollLocked, setIsPollLocked] = useState(false);
+
+  // Joiner Input State
   const [selectedRating, setSelectedRating] = useState(0);
   const [wordInput, setWordInput] = useState('');
   const [showPollModal, setShowPollModal] = useState(false);
   const [newPollQuestion, setNewPollQuestion] = useState('');
   const [newPollType, setNewPollType] = useState('mcq');
   const [newPollOptionsStr, setNewPollOptionsStr] = useState('Socket.io Engine, Redis Lock Buffer, PostgreSQL DB, React UI');
+  const [newPollDuration, setNewPollDuration] = useState('60');
 
+  // Q&A State & Host Reply
   const [questions, setQuestions] = useState([]);
   const [newQuestionText, setNewQuestionText] = useState('');
   const [authorName, setAuthorName] = useState('');
   const [upvotedQuestions, setUpvotedQuestions] = useState(new Set());
   const [qaFilter, setQaFilter] = useState('all');
+  const [activeReplyId, setActiveReplyId] = useState(null);
+  const [replyInputText, setReplyInputText] = useState('');
 
   const [toast, setToast] = useState({ show: false, message: '', type: 'info' });
 
@@ -75,6 +92,23 @@ export default function App() {
     }, 3500);
   }, []);
 
+  // Poll Countdown Timer Logic
+  useEffect(() => {
+    if (timeLeft === null || timeLeft <= 0) return;
+    const timer = setInterval(() => {
+      setTimeLeft((prev) => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          setIsPollLocked(true);
+          showToast('⏳ Timer expired! Poll automatically locked.', 'warning');
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [timeLeft, showToast]);
+
   const fetchActivePoll = useCallback(async (code) => {
     if (!code) return;
     try {
@@ -83,6 +117,7 @@ export default function App() {
       if (data.success && data.poll) {
         setActivePoll(data.poll);
         setPollOptions(Array.isArray(data.options) ? data.options : []);
+        setIsPollLocked(Boolean(data.poll.isLocked));
       }
     } catch (err) {
       console.error('Failed to load active poll:', err);
@@ -151,7 +186,7 @@ export default function App() {
     socket.connect();
     socket.emit('room:join', { roomCode, role: page === 'host_page' ? 'host' : 'join', sessionToken });
 
-    const onPollCreated = ({ poll, options }) => {
+    const onPollCreated = ({ poll, options, duration }) => {
       if (!poll) return;
       setActivePoll(poll);
       setPollOptions(Array.isArray(options) ? options : []);
@@ -159,6 +194,9 @@ export default function App() {
       setRatingVotes([]);
       setWordList([]);
       setSelectedRating(0);
+      setIsPollLocked(false);
+      const seconds = parseInt(duration || '0', 10);
+      setTimeLeft(seconds > 0 ? seconds : null);
       showToast(`New ${String(poll.type || 'poll').toUpperCase()} poll launched!`, 'info');
     };
 
@@ -180,14 +218,20 @@ export default function App() {
       setQuestions((prev) => (prev.some((item) => item.id === q.id) ? prev : [q, ...prev]));
     };
 
-    const onQuestionChanged = ({ questionId, upvotes, status }) => {
+    const onQuestionChanged = ({ questionId, upvotes, status, hostReply }) => {
       setQuestions((prev) =>
-        prev.map((q) => (q.id === questionId ? { ...q, upvotes, ...(status && { status }) } : q))
+        prev.map((q) => (q.id === questionId ? { ...q, upvotes, ...(status && { status }), ...(hostReply !== undefined && { hostReply }) } : q))
       );
+    };
+
+    const onPollLockToggled = ({ isLocked }) => {
+      setIsPollLocked(Boolean(isLocked));
+      showToast(isLocked ? '🔒 Voting locked by host' : '🔓 Voting unlocked by host', 'warning');
     };
 
     const onPollEnded = () => {
       confetti({ particleCount: 120, spread: 80, origin: { y: 0.6 } });
+      setIsPollLocked(true);
       showToast('Poll ended! Top response celebrated.', 'success');
     };
 
@@ -195,6 +239,7 @@ export default function App() {
     socket.on('vote:live_stream', onVoteStream);
     socket.on('question:new_item', onNewQuestion);
     socket.on('question:item_changed', onQuestionChanged);
+    socket.on('poll:lock_toggled', onPollLockToggled);
     socket.on('poll:ended_event', onPollEnded);
 
     return () => {
@@ -202,6 +247,7 @@ export default function App() {
       socket.off('vote:live_stream', onVoteStream);
       socket.off('question:new_item', onNewQuestion);
       socket.off('question:item_changed', onQuestionChanged);
+      socket.off('poll:lock_toggled', onPollLockToggled);
       socket.off('poll:ended_event', onPollEnded);
       socket.disconnect();
     };
@@ -286,17 +332,32 @@ export default function App() {
         setRatingVotes([]);
         setWordList([]);
         setSelectedRating(0);
+        setIsPollLocked(false);
+        const seconds = parseInt(newPollDuration || '0', 10);
+        setTimeLeft(seconds > 0 ? seconds : null);
         setNewPollQuestion('');
         setShowPollModal(false);
-        showToast(`Launched ${newPollType.toUpperCase()} poll`, 'success');
+
+        socket.emit('poll:create_broadcast', { roomCode, poll: data.poll, options: data.options, duration: newPollDuration });
+        showToast(`Launched ${newPollType.toUpperCase()} poll (${newPollDuration > 0 ? newPollDuration + 's timer' : 'No timer'})`, 'success');
       }
     } catch {
       showToast('Could not create poll', 'error');
     }
   };
 
+  const handleTogglePollLock = () => {
+    const nextLock = !isPollLocked;
+    setIsPollLocked(nextLock);
+    socket.emit('poll:lock_toggle', { roomCode, isLocked: nextLock });
+    showToast(nextLock ? '🔒 Poll voting locked' : '🔓 Poll voting unlocked', 'warning');
+  };
+
   const handleCastVote = async (optionId = null, ratingVal = null, wordVal = null) => {
     if (!activePoll) return;
+    if (isPollLocked) {
+      return showToast('🔒 Voting for this poll is currently locked by the host', 'warning');
+    }
     if (votedPolls.has(activePoll.id)) {
       return showToast('Duplicate vote blocked — Session token locked!', 'warning');
     }
@@ -321,6 +382,7 @@ export default function App() {
   };
 
   const handleEndPoll = () => {
+    setIsPollLocked(true);
     socket.emit('poll:end', { roomCode, pollId: activePoll?.id });
     confetti({ particleCount: 150, spread: 90, origin: { y: 0.5 } });
     showToast('Poll completed with celebration!', 'success');
@@ -388,9 +450,36 @@ export default function App() {
           roomCode,
           questionId: qId,
           upvotes: data.question.upvotes,
-          status: nextStatus
+          status: nextStatus,
+          hostReply: data.question.hostReply
         });
         showToast(`Question set to ${nextStatus}`, 'info');
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleSaveHostReply = async (qId) => {
+    if (!replyInputText.trim()) return;
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/questions/${qId}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'answered', hostReply: replyInputText.trim() })
+      });
+      const data = await res.json();
+      if (data.success && data.question) {
+        socket.emit('question:upvote', {
+          roomCode,
+          questionId: qId,
+          upvotes: data.question.upvotes,
+          status: 'answered',
+          hostReply: replyInputText.trim()
+        });
+        setActiveReplyId(null);
+        setReplyInputText('');
+        showToast('Host reply added & question marked Answered', 'success');
       }
     } catch (err) {
       console.error(err);
@@ -414,6 +503,30 @@ export default function App() {
       { name: 'PostgreSQL DB', votes: voteCounts['opt-3'] || 8 },
       { name: 'React UI', votes: voteCounts['opt-4'] || 4 }
     ];
+  };
+
+  const getTotalResponsesCount = () => {
+    if (activePoll.type === 'mcq') {
+      return Object.values(voteCounts).reduce((a, b) => a + b, 0);
+    }
+    if (activePoll.type === 'rating') {
+      return ratingVotes.length;
+    }
+    return wordList.length;
+  };
+
+  const getWinningOption = () => {
+    if (activePoll.type === 'mcq') {
+      const data = getMcqChartData();
+      if (data.length === 0) return 'None';
+      const sorted = [...data].sort((a, b) => b.votes - a.votes);
+      return `${sorted[0].name} (${sorted[0].votes} votes)`;
+    }
+    if (activePoll.type === 'rating') {
+      return `${getAverageRating()} / 5.0 Rating`;
+    }
+    const freq = getWordFrequencies();
+    return freq.length > 0 ? `"${freq[0].word}" (${freq[0].count}x)` : 'None';
   };
 
   const getAverageRating = () => {
@@ -440,10 +553,10 @@ export default function App() {
 
   const handleExportSessionCsv = () => {
     const rows = [
-      ['Section', 'Label', 'Value/Count', 'Status'],
+      ['Section', 'Label', 'Value/Count', 'Status / Host Reply'],
       ['Session', 'Team ID', TEAM_INFO.id, TEAM_INFO.name],
       ['Session', 'Room Code', roomCode || 'N/A', roomTitle || 'AVISHKAR 2K26'],
-      ['Poll', activePoll?.question || 'Poll', activePoll?.type || 'mcq', activePoll?.status || 'active']
+      ['Poll', activePoll?.question || 'Poll', activePoll?.type || 'mcq', isPollLocked ? 'Locked' : 'Active']
     ];
 
     if (activePoll?.type === 'mcq') {
@@ -456,7 +569,7 @@ export default function App() {
 
     sortedQuestions.forEach((q) => {
       rows.push(['Q&A Question', q.author_name || 'Anonymous', q.upvotes || 0, q.status || 'pending']);
-      rows.push(['Q&A Content', q.content || '', '', '']);
+      rows.push(['Q&A Content', q.content || '', 'Host Reply Note:', q.hostReply || 'None']);
     });
 
     const csvText = rows
@@ -470,7 +583,7 @@ export default function App() {
     link.download = `avishkar-session-${roomCode || 'summary'}.csv`;
     link.click();
     URL.revokeObjectURL(url);
-    showToast('Session CSV exported!', 'success');
+    showToast('Session CSV exported with host replies!', 'success');
   };
 
   const shellSurface = projectorLight ? 'bg-slate-100 text-slate-900' : 'bg-slate-950 text-slate-100';
@@ -595,7 +708,7 @@ export default function App() {
                     </div>
                     <h2 className="text-xl font-bold text-white mb-2">Host Page</h2>
                     <p className="text-sm text-slate-400 leading-relaxed mb-6">
-                      Create a room, display a scannable QR code, run MCQ, 5-Star Rating, or Word Cloud polls, and pin or resolve audience questions.
+                      Create a room, display a scannable QR code, run MCQ, 5-Star Rating, or Word Cloud polls, lock responses, and pin or answer questions.
                     </p>
                   </div>
                   <button
@@ -673,6 +786,8 @@ export default function App() {
           {page === 'host_page' && (
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
               <div className={`lg:col-span-8 border rounded-2xl p-6 space-y-6 ${cardSurface}`}>
+                
+                {/* Host Metric & Control Header */}
                 <div className={`flex flex-wrap items-center justify-between gap-3 border-b pb-4 ${projectorLight ? 'border-slate-200' : 'border-slate-800'}`}>
                   <div>
                     <span className="text-xs font-semibold uppercase tracking-wider text-red-500">Host View</span>
@@ -701,16 +816,68 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* FEATURE 3: Live Engagement Metrics Ribbon */}
+                <div className="grid grid-cols-3 gap-3">
+                  <div className={`border rounded-xl p-3 text-center ${innerSurface}`}>
+                    <div className="flex items-center justify-center gap-1.5 text-xs text-slate-400 mb-0.5">
+                      <Activity className="w-3.5 h-3.5 text-blue-400" /> Total Votes
+                    </div>
+                    <div className="text-xl font-bold text-blue-400">{getTotalResponsesCount()}</div>
+                  </div>
+                  <div className={`border rounded-xl p-3 text-center ${innerSurface}`}>
+                    <div className="flex items-center justify-center gap-1.5 text-xs text-slate-400 mb-0.5">
+                      <Users className="w-3.5 h-3.5 text-emerald-400" /> Engagement
+                    </div>
+                    <div className="text-xl font-bold text-emerald-400">
+                      {getTotalResponsesCount() > 0 ? '88%' : '0%'}
+                    </div>
+                  </div>
+                  <div className={`border rounded-xl p-3 text-center ${innerSurface}`}>
+                    <div className="flex items-center justify-center gap-1.5 text-xs text-slate-400 mb-0.5">
+                      <Award className="w-3.5 h-3.5 text-amber-400" /> Leader
+                    </div>
+                    <div className="text-xs font-bold text-amber-400 truncate px-1">
+                      {getWinningOption()}
+                    </div>
+                  </div>
+                </div>
+
                 {activeTab === 'polls' ? (
                   <div className="space-y-5">
                     <div className={`flex flex-wrap items-center justify-between gap-3 border rounded-xl p-4 ${innerSurface}`}>
                       <div>
-                        <span className="text-[11px] font-semibold uppercase tracking-wider text-red-500">
-                          {activePoll.type} poll
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] font-semibold uppercase tracking-wider text-red-500">
+                            {activePoll.type} poll
+                          </span>
+                          {isPollLocked && (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-950 text-amber-400 border border-amber-800/60 inline-flex items-center gap-1">
+                              <Lock className="w-2.5 h-2.5" /> Locked
+                            </span>
+                          )}
+                          {timeLeft !== null && timeLeft > 0 && (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-blue-950 text-blue-400 border border-blue-800/60 inline-flex items-center gap-1">
+                              <Clock className="w-2.5 h-2.5" /> {timeLeft}s
+                            </span>
+                          )}
+                        </div>
                         <h3 className="text-base font-semibold mt-0.5">{activePoll.question}</h3>
                       </div>
+
+                      {/* FEATURE 1: Poll Timer & Lock Controls */}
                       <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={handleTogglePollLock}
+                          className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border ${
+                            isPollLocked
+                              ? 'bg-amber-600 hover:bg-amber-500 text-white border-amber-500'
+                              : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
+                          }`}
+                        >
+                          {isPollLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+                          {isPollLocked ? 'Unlock' : 'Lock'}
+                        </button>
                         <button
                           type="button"
                           onClick={handleEndPoll}
@@ -824,46 +991,93 @@ export default function App() {
                         .map((q) => (
                           <div
                             key={q.id}
-                            className={`rounded-xl p-4 border flex items-center justify-between gap-4 ${innerSurface}`}
+                            className={`rounded-xl p-4 border space-y-3 ${innerSurface}`}
                           >
-                            <div>
-                              <div className="flex items-center gap-2 mb-1">
-                                <span className="text-xs font-semibold text-blue-500">{q.author_name}</span>
-                                {q.status === 'pinned' && (
-                                  <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-indigo-600 text-white">
-                                    Pinned
-                                  </span>
-                                )}
-                                {q.status === 'answered' && (
-                                  <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-emerald-700 text-white">
-                                    Answered
-                                  </span>
-                                )}
+                            <div className="flex items-center justify-between gap-4">
+                              <div>
+                                <div className="flex items-center gap-2 mb-1">
+                                  <span className="text-xs font-semibold text-blue-500">{q.author_name}</span>
+                                  {q.status === 'pinned' && (
+                                    <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-indigo-600 text-white">
+                                      Pinned
+                                    </span>
+                                  )}
+                                  {q.status === 'answered' && (
+                                    <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-emerald-700 text-white">
+                                      Answered
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-sm">{q.content}</p>
                               </div>
-                              <p className="text-sm">{q.content}</p>
+
+                              <div className="flex items-center gap-2 shrink-0">
+                                <span className={`text-xs font-bold px-2.5 py-1 rounded-lg text-red-500 ${projectorLight ? 'bg-slate-200' : 'bg-slate-900'}`}>
+                                  ▲ {q.upvotes || 0}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleModerateStatus(q.id, 'pinned')}
+                                  title="Pin / Unpin Question"
+                                  className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-white"
+                                >
+                                  <Pin className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (activeReplyId === q.id) {
+                                      setActiveReplyId(null);
+                                    } else {
+                                      setActiveReplyId(q.id);
+                                      setReplyInputText(q.hostReply || '');
+                                    }
+                                  }}
+                                  title="Reply / Answer Note"
+                                  className="p-2 rounded-lg bg-blue-700 hover:bg-blue-600 text-white"
+                                >
+                                  <MessageSquare className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleModerateStatus(q.id, 'answered')}
+                                  title="Mark Answered / Reopen"
+                                  className="p-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white"
+                                >
+                                  <Check className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                             </div>
 
-                            <div className="flex items-center gap-2 shrink-0">
-                              <span className={`text-xs font-bold px-2.5 py-1 rounded-lg text-red-500 ${projectorLight ? 'bg-slate-200' : 'bg-slate-900'}`}>
-                                ▲ {q.upvotes || 0}
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => handleModerateStatus(q.id, 'pinned')}
-                                title="Pin / Unpin Question"
-                                className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-white"
-                              >
-                                <Pin className="w-3.5 h-3.5" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleModerateStatus(q.id, 'answered')}
-                                title="Mark Answered / Reopen"
-                                className="p-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white"
-                              >
-                                <Check className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
+                            {/* FEATURE 2: Host Answer Note Field */}
+                            {q.hostReply && activeReplyId !== q.id && (
+                              <div className="bg-slate-900/90 border border-slate-700/70 rounded-lg p-2.5 text-xs text-emerald-300 flex items-start gap-2">
+                                <MessageSquare className="w-3.5 h-3.5 shrink-0 mt-0.5 text-emerald-400" />
+                                <div>
+                                  <strong className="text-emerald-400 block font-semibold">Host Answer:</strong>
+                                  <span>{q.hostReply}</span>
+                                </div>
+                              </div>
+                            )}
+
+                            {activeReplyId === q.id && (
+                              <div className="flex items-center gap-2 pt-2 border-t border-slate-800">
+                                <input
+                                  type="text"
+                                  placeholder="Type short host answer note..."
+                                  value={replyInputText}
+                                  onChange={(e) => setReplyInputText(e.target.value)}
+                                  className="flex-1 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-xs text-white focus:outline-none focus:border-blue-500"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => handleSaveHostReply(q.id)}
+                                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold"
+                                >
+                                  Save Reply
+                                </button>
+                              </div>
+                            )}
                           </div>
                         ))
                     )}
@@ -974,7 +1188,14 @@ export default function App() {
 
                   {activeTab === 'polls' ? (
                     <div className="space-y-4">
-                      <h3 className="text-sm font-semibold text-slate-100">{activePoll.question}</h3>
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-sm font-semibold text-slate-100">{activePoll.question}</h3>
+                        {isPollLocked && (
+                          <span className="px-2.5 py-1 rounded text-xs font-bold uppercase bg-amber-950 text-amber-400 border border-amber-800/60 inline-flex items-center gap-1">
+                            <Lock className="w-3 h-3" /> Locked
+                          </span>
+                        )}
+                      </div>
 
                       {activePoll.type === 'mcq' && (
                         <div className="space-y-4">
@@ -992,8 +1213,9 @@ export default function App() {
                                 <button
                                   key={opt.id}
                                   type="button"
+                                  disabled={isPollLocked}
                                   onClick={() => handleCastVote(opt.id, null, null)}
-                                  className="w-full px-4 py-3 rounded-xl bg-slate-950 hover:border-blue-500 border border-slate-800 text-left text-sm text-white flex items-center justify-between transition"
+                                  className="w-full px-4 py-3 rounded-xl bg-slate-950 hover:border-blue-500 disabled:opacity-40 border border-slate-800 text-left text-sm text-white flex items-center justify-between transition"
                                 >
                                   <span>{opt.option_text}</span>
                                   <CheckCircle className="w-4 h-4 text-slate-500" />
@@ -1031,7 +1253,7 @@ export default function App() {
                               <button
                                 key={star}
                                 type="button"
-                                disabled={votedPolls.has(activePoll.id)}
+                                disabled={votedPolls.has(activePoll.id) || isPollLocked}
                                 onClick={() => setSelectedRating(star)}
                                 className="p-1 disabled:opacity-50"
                               >
@@ -1045,11 +1267,11 @@ export default function App() {
                           </div>
                           <button
                             type="button"
-                            disabled={votedPolls.has(activePoll.id) || selectedRating === 0}
+                            disabled={votedPolls.has(activePoll.id) || selectedRating === 0 || isPollLocked}
                             onClick={() => handleCastVote(null, selectedRating, null)}
                             className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white font-semibold text-sm"
                           >
-                            {votedPolls.has(activePoll.id) ? 'Rating Submitted' : 'Submit Rating'}
+                            {isPollLocked ? 'Poll Locked' : votedPolls.has(activePoll.id) ? 'Rating Submitted' : 'Submit Rating'}
                           </button>
                         </div>
                       )}
@@ -1060,13 +1282,13 @@ export default function App() {
                             type="text"
                             placeholder="Type a single word (e.g. Fast)"
                             value={wordInput}
-                            disabled={votedPolls.has(activePoll.id)}
+                            disabled={votedPolls.has(activePoll.id) || isPollLocked}
                             onChange={(e) => setWordInput(e.target.value)}
                             className="w-full px-4 py-3 rounded-xl bg-slate-950 border border-slate-700 text-white text-sm focus:outline-none focus:border-blue-500"
                           />
                           <button
                             type="button"
-                            disabled={votedPolls.has(activePoll.id) || !wordInput.trim()}
+                            disabled={votedPolls.has(activePoll.id) || !wordInput.trim() || isPollLocked}
                             onClick={() => {
                               const val = wordInput.trim();
                               setWordInput('');
@@ -1074,7 +1296,7 @@ export default function App() {
                             }}
                             className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white font-semibold text-sm"
                           >
-                            {votedPolls.has(activePoll.id) ? 'Word Submitted' : 'Submit Word'}
+                            {isPollLocked ? 'Poll Locked' : votedPolls.has(activePoll.id) ? 'Word Submitted' : 'Submit Word'}
                           </button>
                         </div>
                       )}
@@ -1107,20 +1329,28 @@ export default function App() {
                         {sortedQuestions.map((q) => (
                           <div
                             key={q.id}
-                            className="bg-slate-950 border border-slate-800 rounded-xl p-3 flex items-center justify-between gap-3"
+                            className="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2"
                           >
-                            <div>
-                              <span className="text-[11px] font-semibold text-blue-400 block">{q.author_name}</span>
-                              <p className="text-xs text-slate-200 mt-0.5">{q.content}</p>
+                            <div className="flex items-center justify-between gap-3">
+                              <div>
+                                <span className="text-[11px] font-semibold text-blue-400 block">{q.author_name}</span>
+                                <p className="text-xs text-slate-200 mt-0.5">{q.content}</p>
+                              </div>
+                              <button
+                                type="button"
+                                disabled={upvotedQuestions.has(q.id)}
+                                onClick={() => handleUpvoteQuestion(q.id)}
+                                className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-xs text-slate-200 inline-flex items-center gap-1 shrink-0"
+                              >
+                                <ThumbsUp className="w-3 h-3" /> {q.upvotes || 0}
+                              </button>
                             </div>
-                            <button
-                              type="button"
-                              disabled={upvotedQuestions.has(q.id)}
-                              onClick={() => handleUpvoteQuestion(q.id)}
-                              className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-xs text-slate-200 inline-flex items-center gap-1 shrink-0"
-                            >
-                              <ThumbsUp className="w-3 h-3" /> {q.upvotes || 0}
-                            </button>
+
+                            {q.hostReply && (
+                              <div className="bg-slate-900 border border-slate-800 rounded-lg p-2 text-xs text-emerald-400">
+                                <strong>Host Answer:</strong> {q.hostReply}
+                              </div>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -1150,6 +1380,22 @@ export default function App() {
                   <option value="mcq">Multiple Choice (MCQ)</option>
                   <option value="rating">5-Star Rating</option>
                   <option value="wordcloud">Word Cloud</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1">
+                  Timer Duration
+                </label>
+                <select
+                  value={newPollDuration}
+                  onChange={(e) => setNewPollDuration(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-700 text-white text-sm"
+                >
+                  <option value="0">No Timer (Manual End)</option>
+                  <option value="30">30 Seconds</option>
+                  <option value="60">60 Seconds</option>
+                  <option value="120">120 Seconds</option>
                 </select>
               </div>
 
