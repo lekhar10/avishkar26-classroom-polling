@@ -1,16 +1,4 @@
-﻿# Node dependencies
-node_modules/
-npm-debug.log*
-
-# Environment & local configs
-.env
-.env.local
-
-# Frontend build outputs
+﻿node_modules/
 dist/
-build/
-
-# System & IDE files
-.vscode/
-.DS_Store
-Thumbs.db
+.env
+*.log
